@@ -1,0 +1,35 @@
+plugins:
+  enabled: true
+  dir: plugins
+  configs:
+    quota-window-activator:
+      enabled: true
+      priority: 10
+      dry_run: true
+      observation_interval: 30m
+      reset_grace_period: 60s
+      verify_delay: 3s
+      suppression_duration: 10m
+      request_timeout: 30s
+      max_retries: 5
+      max_concurrency: 2
+      providers:
+        codex:
+          enabled: true
+          mode: activate_if_lazy
+        antigravity:
+          enabled: true
+          mode: observe
+        claude:
+          enabled: true
+          mode: observe
+        gemini-cli:
+          enabled: true
+          mode: observe
+        kimi:
+          enabled: true
+          mode: observe
+        xai:
+          enabled: true
+          mode: observe
+      disabled_credentials: []

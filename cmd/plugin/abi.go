@@ -1,0 +1,261 @@
+package main
+
+/*
+#include <stdint.h>
+#include <stdlib.h>
+
+typedef struct { void* ptr; size_t len; } cliproxy_buffer;
+typedef int (*cliproxy_host_call_fn)(void*, const char*, const uint8_t*, size_t, cliproxy_buffer*);
+typedef void (*cliproxy_host_free_fn)(void*, size_t);
+typedef struct { uint32_t abi_version; void* host_ctx; cliproxy_host_call_fn call; cliproxy_host_free_fn free_buffer; } cliproxy_host_api;
+typedef int (*cliproxy_plugin_call_fn)(char*, uint8_t*, size_t, cliproxy_buffer*);
+typedef void (*cliproxy_plugin_free_fn)(void*, size_t);
+typedef void (*cliproxy_plugin_shutdown_fn)(void);
+typedef struct { uint32_t abi_version; cliproxy_plugin_call_fn call; cliproxy_plugin_free_fn free_buffer; cliproxy_plugin_shutdown_fn shutdown; } cliproxy_plugin_api;
+
+extern int cliproxyPluginCall(char*, uint8_t*, size_t, cliproxy_buffer*);
+extern void cliproxyPluginFree(void*, size_t);
+extern void cliproxyPluginShutdown(void);
+
+static int call_host_api(cliproxy_host_api* host, const char* method, const uint8_t* request, size_t request_len, cliproxy_buffer* response) {
+	if (host == NULL || host->call == NULL) return 1;
+	return host->call(host->host_ctx, method, request, request_len, response);
+}
+static void free_host_buffer(cliproxy_host_api* host, void* ptr, size_t len) {
+	if (host != NULL && host->free_buffer != NULL && ptr != NULL) host->free_buffer(ptr, len);
+}
+*/
+import "C"
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"sync"
+	"sync/atomic"
+	"unsafe"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+)
+
+const pluginID = "quota-window-activator"
+
+var hostAPI atomic.Pointer[C.cliproxy_host_api]
+var globalMu sync.Mutex
+var globalRuntime *runtimeService
+
+type envelope struct {
+	OK     bool            `json:"ok"`
+	Result json.RawMessage `json:"result,omitempty"`
+	Error  *envelopeError  `json:"error,omitempty"`
+}
+type envelopeError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+type lifecycleRequest struct {
+	ConfigYAML []byte `json:"config_yaml"`
+}
+type registration struct {
+	SchemaVersion uint32                   `json:"schema_version"`
+	Metadata      pluginapi.Metadata       `json:"metadata"`
+	Capabilities  registrationCapabilities `json:"capabilities"`
+}
+type registrationCapabilities struct {
+	ManagementAPI bool `json:"management_api"`
+}
+
+func main() {}
+
+//export cliproxy_plugin_init
+func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_api) C.int {
+	if plugin == nil {
+		return 1
+	}
+	hostAPI.Store(host)
+	plugin.abi_version = C.uint32_t(pluginabi.ABIVersion)
+	plugin.call = C.cliproxy_plugin_call_fn(C.cliproxyPluginCall)
+	plugin.free_buffer = C.cliproxy_plugin_free_fn(C.cliproxyPluginFree)
+	plugin.shutdown = C.cliproxy_plugin_shutdown_fn(C.cliproxyPluginShutdown)
+	return 0
+}
+
+//export cliproxyPluginCall
+func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t, response *C.cliproxy_buffer) C.int {
+	if response != nil {
+		response.ptr = nil
+		response.len = 0
+	}
+	if method == nil {
+		writeResponse(response, errorEnvelope("invalid_method", "method is required"))
+		return 1
+	}
+	var rawRequest []byte
+	if request != nil && requestLen > 0 {
+		rawRequest = C.GoBytes(unsafe.Pointer(request), C.int(requestLen))
+	}
+	raw, err := handleMethod(C.GoString(method), rawRequest)
+	if err != nil {
+		writeResponse(response, errorEnvelope("plugin_error", err.Error()))
+		return 1
+	}
+	writeResponse(response, raw)
+	return 0
+}
+
+//export cliproxyPluginFree
+func cliproxyPluginFree(ptr unsafe.Pointer, length C.size_t) {
+	if ptr != nil {
+		C.free(ptr)
+	}
+	_ = length
+}
+
+//export cliproxyPluginShutdown
+func cliproxyPluginShutdown() {
+	globalMu.Lock()
+	runtime := globalRuntime
+	globalRuntime = nil
+	globalMu.Unlock()
+	if runtime != nil {
+		_ = runtime.Stop()
+	}
+}
+
+func handleMethod(method string, request []byte) ([]byte, error) {
+	switch method {
+	case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
+		var req lifecycleRequest
+		if len(request) > 0 {
+			if err := json.Unmarshal(request, &req); err != nil {
+				return nil, err
+			}
+		}
+		cfg, err := decodeConfig(req.ConfigYAML)
+		if err != nil {
+			return nil, err
+		}
+		next, err := newRuntime(cfg)
+		if err != nil {
+			return nil, err
+		}
+		globalMu.Lock()
+		old := globalRuntime
+		globalMu.Unlock()
+		if old != nil {
+			if err = old.Stop(); err != nil {
+				return nil, err
+			}
+		}
+		globalMu.Lock()
+		globalRuntime = next
+		globalMu.Unlock()
+		next.Start()
+		return okEnvelope(pluginRegistration())
+	case pluginabi.MethodPluginQuiesce, pluginabi.MethodPluginShutdown:
+		globalMu.Lock()
+		runtime := globalRuntime
+		globalMu.Unlock()
+		if runtime != nil {
+			if err := runtime.Stop(); err != nil {
+				return nil, err
+			}
+		}
+		return okEnvelope(map[string]any{})
+	case pluginabi.MethodManagementRegister:
+		return okEnvelope(managementRegistration())
+	case pluginabi.MethodManagementHandle:
+		return handleManagement(request)
+	default:
+		return errorEnvelope("unknown_method", "unknown method: "+method), nil
+	}
+}
+
+func pluginRegistration() registration {
+	return registration{
+		SchemaVersion: pluginabi.SchemaVersion,
+		Metadata: pluginapi.Metadata{
+			Name:    "Quota Window Activator",
+			Version: "0.1.0",
+			Author:  "CPA community",
+			ConfigFields: []pluginapi.ConfigField{
+				{Name: "enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable background quota observation."},
+				{Name: "dry_run", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Detect lazy resets without sending activation requests."},
+				{Name: "observation_interval", Type: pluginapi.ConfigFieldTypeString, Description: "Background quota observation interval."},
+			},
+		},
+		Capabilities: registrationCapabilities{ManagementAPI: true},
+	}
+}
+
+func okEnvelope(v any) ([]byte, error) {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(envelope{OK: true, Result: raw})
+}
+func errorEnvelope(code, message string) []byte {
+	raw, _ := json.Marshal(envelope{OK: false, Error: &envelopeError{Code: code, Message: message}})
+	return raw
+}
+func writeResponse(response *C.cliproxy_buffer, raw []byte) {
+	if response == nil || len(raw) == 0 {
+		return
+	}
+	ptr := C.CBytes(raw)
+	if ptr == nil {
+		return
+	}
+	response.ptr = ptr
+	response.len = C.size_t(len(raw))
+}
+
+func callHostCallback(method string, payload any) (json.RawMessage, error) {
+	host := hostAPI.Load()
+	if host == nil {
+		return nil, errors.New("host API unavailable")
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	cMethod := C.CString(method)
+	defer C.free(unsafe.Pointer(cMethod))
+	var response C.cliproxy_buffer
+	var request *C.uint8_t
+	if len(raw) > 0 {
+		p := C.CBytes(raw)
+		if p == nil {
+			return nil, errors.New("host request allocation failed")
+		}
+		defer C.free(p)
+		request = (*C.uint8_t)(p)
+	}
+	code := C.call_host_api(host, cMethod, request, C.size_t(len(raw)), &response)
+	var out []byte
+	if response.ptr != nil && response.len > 0 {
+		out = C.GoBytes(response.ptr, C.int(response.len))
+	}
+	if response.ptr != nil {
+		C.free_host_buffer(host, response.ptr, response.len)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("host callback %s returned no response", method)
+	}
+	var env envelope
+	if err = json.Unmarshal(out, &env); err != nil {
+		return nil, err
+	}
+	if !env.OK {
+		if env.Error != nil {
+			return nil, fmt.Errorf("%s: %s", env.Error.Code, env.Error.Message)
+		}
+		return nil, fmt.Errorf("host callback %s failed", method)
+	}
+	if code != 0 {
+		return nil, fmt.Errorf("host callback %s returned %d", method, int(code))
+	}
+	return append(json.RawMessage(nil), env.Result...), nil
+}
