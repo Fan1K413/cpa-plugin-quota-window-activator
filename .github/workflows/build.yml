@@ -1,0 +1,99 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test and vet
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test -count=1 ./...
+
+  build:
+    name: Build ${{ matrix.goos }}-${{ matrix.goarch }}
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            extension: so
+          - runner: ubuntu-24.04-arm
+            goos: linux
+            goarch: arm64
+            extension: so
+          - runner: macos-15-intel
+            goos: darwin
+            goarch: amd64
+            extension: dylib
+          - runner: macos-15
+            goos: darwin
+            goarch: arm64
+            extension: dylib
+          - runner: windows-latest
+            goos: windows
+            goarch: amd64
+            extension: dll
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Set up MinGW-w64
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: mingw-w64-ucrt-x86_64-gcc
+          path-type: inherit
+      - name: Build Unix library
+        if: runner.os != 'Windows'
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          mkdir -p dist
+          go build -buildvcs=false -trimpath -buildmode=c-shared -o "dist/quota-window-activator.${{ matrix.extension }}" ./cmd/plugin
+          rm -f dist/quota-window-activator.h
+      - name: Build Windows library
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        env:
+          CGO_ENABLED: "1"
+          CC: gcc
+        run: |
+          mkdir -p dist
+          go build -buildvcs=false -trimpath -buildmode=c-shared -o dist/quota-window-activator.dll ./cmd/plugin
+          rm -f dist/quota-window-activator.h
+      - name: Add documentation
+        shell: bash
+        run: cp README.md README.zh-CN.md LICENSE config.example.yaml dist/
+      - name: Upload plugin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: quota-window-activator_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14

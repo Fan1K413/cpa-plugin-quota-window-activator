@@ -71,6 +71,16 @@ Windows 可运行：
 .\build.ps1
 ```
 
+仓库包含 `.github/workflows/build.yml`。推送、Pull Request 或在 Actions 页面手动运行 **Build** 后，会先执行 `go vet` 和完整测试，再生成以下 artifacts：
+
+- `quota-window-activator_linux_amd64`
+- `quota-window-activator_linux_arm64`
+- `quota-window-activator_darwin_amd64`
+- `quota-window-activator_darwin_arm64`
+- `quota-window-activator_windows_amd64`
+
+GitHub 会把每个 artifact 自动打成下载 ZIP；内部包含对应动态库、README、License 和示例配置。该 workflow 只构建 artifact，不自动创建 Release。
+
 把生成的动态库放在 CPA 的 `plugins/<GOOS>/<GOARCH>/` 或 `plugins/` 目录。文件名必须是：
 
 - Windows：`quota-window-activator.dll`

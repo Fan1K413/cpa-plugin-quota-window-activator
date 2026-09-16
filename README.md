@@ -61,6 +61,12 @@ On Windows:
 .\build.ps1
 ```
 
+The repository includes `.github/workflows/build.yml`. Pushes, pull requests,
+and manual **Build** runs first execute `go vet` and the full test suite, then
+upload Linux amd64/arm64, macOS amd64/arm64, and Windows amd64 artifacts. GitHub wraps
+each artifact as a downloadable ZIP containing the library, documentation,
+license, and example configuration. The workflow does not publish a Release.
+
 Install the resulting `quota-window-activator.dll`, `.so`, or `.dylib` under CPA's `plugins/<GOOS>/<GOARCH>/` or `plugins/` directory. The basename is the plugin ID.
 
 ## Configuration
