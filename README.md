@@ -108,6 +108,13 @@ State defaults to the operating-system user config directory under `CLIProxyAPI/
 - UI: `/v0/resource/plugins/quota-window-activator/status`
 - Authenticated JSON: `GET /v0/management/plugins/quota-window-activator/status`
 
+The browser resource is a combined configuration and status panel. After a
+CPA Management key is entered, it loads and saves the complete plugin config
+through CPA's own authenticated plugin-config API, while preserving unknown
+top-level and provider fields. The key stays in page memory and is never
+written to plugin state or browser storage. Disabling dry-run requires an
+explicit confirmation in the panel.
+
 The status reports provider, credential, bucket, usage, reset, state, checks, activation time, and result. Logs use the `[quota-activator]` prefix and omit tokens, authorization headers, credential JSON, and upstream bodies.
 
 ## CPA v7.2.154 boundaries

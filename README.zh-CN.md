@@ -154,6 +154,11 @@ plugins:
 GET /v0/management/plugins/quota-window-activator/status
 ```
 
+浏览器资源是“配置 + 状态”一体面板。输入 CPA Management key 后，可以通过
+CPA 自带的插件配置 API 读取和保存全部参数；页面会保留未知的顶层字段和
+provider 字段，方便后续版本扩展。Management key 只存在当前页面内存中，
+不会写入插件状态或浏览器存储。通过面板关闭 dry-run 时还会要求再次确认。
+
 状态包括 provider、credential、bucket、used、reset、baseline、probe state、last probe、next check、last activation 和 result。典型状态为：
 
 ```text

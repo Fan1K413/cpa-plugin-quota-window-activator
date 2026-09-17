@@ -39,7 +39,10 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
-const pluginID = "quota-window-activator"
+const (
+	pluginID      = "quota-window-activator"
+	pluginVersion = "0.1.1"
+)
 
 var hostAPI atomic.Pointer[C.cliproxy_host_api]
 var globalMu sync.Mutex
@@ -176,13 +179,23 @@ func pluginRegistration() registration {
 	return registration{
 		SchemaVersion: pluginabi.SchemaVersion,
 		Metadata: pluginapi.Metadata{
-			Name:    "Quota Window Activator",
-			Version: "0.1.0",
-			Author:  "CPA community",
+			Name:             "Quota Window Activator",
+			Version:          pluginVersion,
+			Author:           "CPA community",
+			GitHubRepository: "https://github.com/Fan1K413/cpa-plugin-quota-window-activator",
 			ConfigFields: []pluginapi.ConfigField{
 				{Name: "enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable background quota observation."},
 				{Name: "dry_run", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Detect lazy resets without sending activation requests."},
 				{Name: "observation_interval", Type: pluginapi.ConfigFieldTypeString, Description: "Background quota observation interval."},
+				{Name: "reset_grace_period", Type: pluginapi.ConfigFieldTypeString, Description: "Delay after the old reset deadline before running the authoritative precheck."},
+				{Name: "verify_delay", Type: pluginapi.ConfigFieldTypeString, Description: "Propagation delay before verifying an activation request."},
+				{Name: "suppression_duration", Type: pluginapi.ConfigFieldTypeString, Description: "Verify-only suppression window after an unknown send result."},
+				{Name: "request_timeout", Type: pluginapi.ConfigFieldTypeString, Description: "Timeout for quota reads and credential-bound activation requests."},
+				{Name: "max_retries", Type: pluginapi.ConfigFieldTypeInteger, Description: "Maximum control-plane read retries; this never permits a second activation send in one cycle."},
+				{Name: "max_concurrency", Type: pluginapi.ConfigFieldTypeInteger, Description: "Maximum number of credentials observed concurrently."},
+				{Name: "state_dir", Type: pluginapi.ConfigFieldTypeString, Description: "Optional directory for the crash-safe state snapshot and WAL."},
+				{Name: "providers", Type: pluginapi.ConfigFieldTypeObject, Description: "Per-provider enable and activation policy settings."},
+				{Name: "disabled_credentials", Type: pluginapi.ConfigFieldTypeArray, Description: "Auth IDs that this plugin must not observe or activate."},
 			},
 		},
 		Capabilities: registrationCapabilities{ManagementAPI: true},
