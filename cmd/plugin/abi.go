@@ -41,7 +41,7 @@ import (
 
 const (
 	pluginID      = "quota-window-activator"
-	pluginVersion = "0.2.0"
+	pluginVersion = "0.2.1"
 )
 
 var hostAPI atomic.Pointer[C.cliproxy_host_api]
@@ -167,7 +167,13 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 		}
 		return okEnvelope(map[string]any{})
 	case pluginabi.MethodManagementRegister:
-		return okEnvelope(managementRegistration())
+		var req pluginapi.ManagementRegistrationRequest
+		if len(request) > 0 {
+			if err := json.Unmarshal(request, &req); err != nil {
+				return nil, err
+			}
+		}
+		return okEnvelope(managementRegistration(req))
 	case pluginabi.MethodManagementHandle:
 		return handleManagement(request)
 	default:

@@ -3,10 +3,12 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 func TestManagementRegistrationSeparatesResourceAndProtectedStatus(t *testing.T) {
-	r := managementRegistration()
+	r := managementRegistration(pluginapi.ManagementRegistrationRequest{})
 	if len(r.Resources) != 1 || r.Resources[0].Path != "/status" {
 		t.Fatalf("resources=%#v", r.Resources)
 	}
@@ -15,12 +17,30 @@ func TestManagementRegistrationSeparatesResourceAndProtectedStatus(t *testing.T)
 	}
 }
 
+func TestManagementRegistrationUsesActualPluginID(t *testing.T) {
+	r := managementRegistration(pluginapi.ManagementRegistrationRequest{ResourceBasePath: "/v0/resource/plugins/custom-file-name"})
+	if len(r.Routes) != 1 || r.Routes[0].Path != "/plugins/custom-file-name/status" {
+		t.Fatalf("routes=%#v", r.Routes)
+	}
+}
+
+func TestManagementStatusRecognizesFullCPAPath(t *testing.T) {
+	for _, path := range []string{managementPath, "/v0/management" + managementPath, "/v0/management/plugins/custom-file-name/status"} {
+		if !isManagementStatusRequest(pluginapi.ManagementRequest{Method: "GET", Path: path}) {
+			t.Fatalf("status path not recognized: %s", path)
+		}
+	}
+	if isManagementStatusRequest(pluginapi.ManagementRequest{Method: "POST", Path: "/v0/management" + managementPath}) {
+		t.Fatal("POST unexpectedly recognized as status GET")
+	}
+}
+
 func TestStatusPageContainsNoCredentialDataAndRequiresKey(t *testing.T) {
 	if !strings.Contains(statusPage, "type=\"password\"") || !strings.Contains(statusPage, "Authorization") {
 		t.Fatal("status page must request a management key")
 	}
 	for _, required := range []string{
-		"/v0/management/plugins/", "configPath", "method:'PUT'", "disabledCredentials",
+		"resourceMarker", "encodeURIComponent(pluginID)", "configPath", "method:'PUT'", "disabledCredentials",
 		"observationInterval", "activate_if_lazy", "Quota Window 状态", "['antigravity','Antigravity'",
 	} {
 		if !strings.Contains(statusPage, required) {
