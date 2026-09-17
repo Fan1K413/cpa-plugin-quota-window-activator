@@ -95,9 +95,6 @@ func TestNormalResetDoesNotActivate(t *testing.T) {
 	if err := c.Tick(context.Background(), cred, a); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Tick(context.Background(), cred, a); err != nil {
-		t.Fatal(err)
-	}
 	if send.count() != 0 {
 		t.Fatalf("send calls=%d", send.count())
 	}
@@ -113,9 +110,6 @@ func TestLazyResetSendsOnceAndVerifies(t *testing.T) {
 	if err := c.Tick(context.Background(), cred, a); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Tick(context.Background(), cred, a); err != nil {
-		t.Fatal(err)
-	}
 	if send.count() != 1 {
 		t.Fatalf("send calls=%d", send.count())
 	}
@@ -123,6 +117,64 @@ func TestLazyResetSendsOnceAndVerifies(t *testing.T) {
 		if r.State != StateConfirmed {
 			t.Fatalf("state=%s", r.State)
 		}
+	}
+}
+
+func TestFirstObservationStrictLazyRunsPrecheckAndActivatesImmediately(t *testing.T) {
+	now := time.Unix(20000, 0).UTC()
+	send := &fakeSender{}
+	c, _ := testController(t, &now, send, false)
+	reset := now.Add(5 * time.Hour)
+	first := win("5h", 0, reset, now)
+	first.LazyHint = true
+	precheck := first
+	verified := win("5h", 1, reset.Add(5*time.Hour), now)
+	adapter := &fakeAdapter{observations: []Observation{
+		{Windows: []QuotaWindow{first}},
+		{Windows: []QuotaWindow{precheck}},
+		{Windows: []QuotaWindow{verified}},
+	}}
+	cred := Credential{AuthID: "a", AuthIndex: "i", Provider: "fake"}
+	if err := c.Tick(context.Background(), cred, adapter); err != nil {
+		t.Fatal(err)
+	}
+	if send.count() != 1 {
+		t.Fatalf("send calls=%d", send.count())
+	}
+	for _, record := range c.Snapshot().Windows {
+		if record.State != StateConfirmed {
+			t.Fatalf("state=%s result=%s", record.State, record.LastResult)
+		}
+	}
+}
+
+func TestPersistedWaitingLazyBaselineMigratesWithoutWaitingFullWindow(t *testing.T) {
+	now := time.Unix(20000, 0).UTC()
+	send := &fakeSender{}
+	c, _ := testController(t, &now, send, false)
+	reset := now.Add(5 * time.Hour)
+	ordinary := win("5h", 0, reset, now)
+	lazy := ordinary
+	lazy.LazyHint = true
+	verified := win("5h", 1, reset.Add(5*time.Hour), now)
+	adapter := &fakeAdapter{observations: []Observation{
+		{Windows: []QuotaWindow{ordinary}},
+		{Windows: []QuotaWindow{lazy}},
+		{Windows: []QuotaWindow{lazy}},
+		{Windows: []QuotaWindow{verified}},
+	}}
+	cred := Credential{AuthID: "a", AuthIndex: "i", Provider: "fake"}
+	if err := c.Tick(context.Background(), cred, adapter); err != nil {
+		t.Fatal(err)
+	}
+	if send.count() != 0 {
+		t.Fatal("ordinary first observation unexpectedly activated")
+	}
+	if err := c.Tick(context.Background(), cred, adapter); err != nil {
+		t.Fatal(err)
+	}
+	if send.count() != 1 {
+		t.Fatalf("migrated baseline send calls=%d", send.count())
 	}
 }
 
@@ -173,7 +225,7 @@ func TestRestartAfterSendingVerifyOnly(t *testing.T) {
 
 func TestRestartBeforeSendRunsFreshPrecheckThenSends(t *testing.T) {
 	now := time.Unix(20000, 0).UTC()
-	old := now.Add(-time.Minute)
+	old := now.Add(time.Hour)
 	cred := Credential{AuthID: "a", AuthIndex: "i", Provider: "fake"}
 	firstSender := &fakeSender{}
 	c, store := testController(t, &now, firstSender, false)
@@ -181,6 +233,7 @@ func TestRestartBeforeSendRunsFreshPrecheckThenSends(t *testing.T) {
 	if err := c.Tick(context.Background(), cred, seedAdapter); err != nil {
 		t.Fatal(err)
 	}
+	now = old.Add(time.Minute)
 	var record WindowRecord
 	for _, item := range store.Snapshot().Windows {
 		record = item
@@ -222,7 +275,7 @@ func TestRestartBeforeSendRunsFreshPrecheckThenSends(t *testing.T) {
 
 func TestRestartDuringSendVerifiesOnly(t *testing.T) {
 	now := time.Unix(20000, 0).UTC()
-	old := now.Add(-time.Minute)
+	old := now.Add(time.Hour)
 	cred := Credential{AuthID: "a", AuthIndex: "i", Provider: "fake"}
 	c, store := testController(t, &now, &fakeSender{}, false)
 	if err := c.Tick(context.Background(), cred, &fakeAdapter{observations: []Observation{{Windows: []QuotaWindow{win("5h", 90, old, now)}}}}); err != nil {
@@ -275,6 +328,7 @@ func TestActivationTimeoutNeverResendsAfterSuppression(t *testing.T) {
 		{Windows: []QuotaWindow{win("5h", 90, old, now)}},
 		{Windows: []QuotaWindow{win("5h", 90, old, now.Add(time.Hour))}},
 		{Windows: []QuotaWindow{win("5h", 90, old, now.Add(time.Hour))}},
+		{Windows: []QuotaWindow{win("5h", 90, old, now.Add(time.Hour))}},
 	}}
 	if err := c.Tick(context.Background(), cred, adapter); err != nil {
 		t.Fatal(err)
@@ -306,7 +360,6 @@ func TestMultipleWindowsOnlyLazyBucketActivates(t *testing.T) {
 	a := &fakeAdapter{observations: []Observation{{Windows: []QuotaWindow{win("5h", 90, old, now.Add(-time.Hour)), win("7d", 50, weekOld, now.Add(-time.Hour))}}, {Windows: []QuotaWindow{win("5h", 90, old, now), win("7d", 0, now.Add(7*24*time.Hour), now)}}, {Windows: []QuotaWindow{win("5h", 1, now.Add(5*time.Hour), now), win("7d", 0, now.Add(7*24*time.Hour), now)}}}}
 	cred := Credential{AuthID: "a", AuthIndex: "i", Provider: "fake"}
 	_ = c.Tick(context.Background(), cred, a)
-	_ = c.Tick(context.Background(), cred, a)
 	if send.count() != 1 {
 		t.Fatalf("send calls=%d", send.count())
 	}
@@ -316,7 +369,7 @@ func TestCredentialReplacementDoesNotReuseState(t *testing.T) {
 	now := time.Unix(20000, 0).UTC()
 	send := &fakeSender{}
 	c, _ := testController(t, &now, send, false)
-	old := now.Add(-time.Minute)
+	old := now.Add(time.Hour)
 	cred := Credential{AuthID: "a", AuthIndex: "i", Provider: "fake", RawJSON: []byte("one")}
 	a := &fakeAdapter{observations: []Observation{{Windows: []QuotaWindow{win("5h", 90, old, now)}}}}
 	if err := c.Tick(context.Background(), cred, a); err != nil {

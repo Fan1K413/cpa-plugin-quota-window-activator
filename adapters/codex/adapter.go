@@ -92,9 +92,8 @@ func (a *Adapter) PlanActivation(_ context.Context, c core.Credential, records [
 		keys = append(keys, r.Key)
 	}
 	payload := map[string]any{
-		"model": activationModel, "instructions": "", "max_output_tokens": 1,
-		"reasoning": map[string]any{"effort": "low"},
-		"input":     []any{map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": "ping"}}}},
+		"model": activationModel, "instructions": "",
+		"input": []any{map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": "ping"}}}},
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

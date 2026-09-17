@@ -32,6 +32,28 @@ func TestParseRejectsIdentitylessBucket(t *testing.T) {
 	}
 }
 
+func TestParseMarksOnlyStrictUnusedAnchorAsLazy(t *testing.T) {
+	now := time.Date(2026, 9, 16, 8, 0, 0, 0, time.UTC)
+	raw := []byte(`{"groups":[{"displayName":"Gemini Models","buckets":[{"bucketId":"gemini-5h","window":"5h","remainingFraction":1,"resetTime":"2026-09-16T13:00:00Z"},{"bucketId":"gemini-weekly","window":"weekly","remainingFraction":0.9,"resetTime":"2026-09-23T08:00:00Z"}]}]}`)
+	obs, err := parse(raw, "auth", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(obs.Windows) != 2 {
+		t.Fatalf("windows=%d", len(obs.Windows))
+	}
+	byID := map[string]core.QuotaWindow{}
+	for _, window := range obs.Windows {
+		byID[window.BucketID] = window
+	}
+	if !byID["gemini-5h"].LazyHint {
+		t.Fatal("unused 5h window anchored to observation must be a strict lazy candidate")
+	}
+	if byID["gemini-weekly"].LazyHint {
+		t.Fatal("non-zero usage must not be a lazy candidate")
+	}
+}
+
 func TestParseAssignsOnlyProvenSharedActivationGroups(t *testing.T) {
 	now := time.Date(2026, 9, 16, 8, 0, 0, 0, time.UTC)
 	raw := []byte(`{"groups":[{"displayName":"Gemini Models","buckets":[{"bucketId":"gemini-5h","window":"5h","remainingFraction":1,"resetTime":"2026-09-16T13:00:00Z"},{"bucketId":"gemini-weekly","window":"weekly","remainingFraction":1,"resetTime":"2026-09-23T08:00:00Z"},{"bucketId":"future-model-bucket","window":"5h","remainingFraction":1,"resetTime":"2026-09-16T13:00:00Z"}]},{"displayName":"Claude and GPT Models","buckets":[{"bucketId":"3p-5h","window":"5h","remainingFraction":1,"resetTime":"2026-09-16T13:00:00Z"},{"bucketId":"3p-weekly","window":"weekly","remainingFraction":1,"resetTime":"2026-09-23T08:00:00Z"}]}]}`)

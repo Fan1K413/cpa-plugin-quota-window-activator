@@ -4,6 +4,11 @@
 
 它不是定时 ping 插件。默认配置为 `dry_run: true`。
 
+v0.2.2 修复安装后无法及时激活的问题：首次观测若符合严格 lazy 特征，
+会立即进行第二次 quota precheck，不再错误等待完整的 5h/长周期。v0.2.1
+已经写入的 `waiting_reset` 状态会原地迁移；持久化的 `NextCheck` 也会在
+reset + grace 到点时真正唤醒调度器。
+
 ## 工作原理
 
 每个窗口使用 `adapter + AuthIndex + credential fingerprint + BucketID` 独立跟踪：
@@ -44,14 +49,14 @@
 
 两个 activation adapter 都绑定从 `host.auth.get` 读取的目标 AuthIndex，直接通过 CPA `host.http.do` 调用 provider endpoint。它们不经过 CPA 普通 `/v1/chat/completions`，不会让 scheduler 再选择账号。
 
-Codex 请求使用 `gpt-5.4-mini`、`ping`、非流式、low reasoning 与 1 个 output token 的预算声明。Antigravity 复用 CPA 的 `v1internal:generateContent` 请求封装：Gemini 组使用 `gemini-3.1-flash-lite`，Claude/GPT 组使用非 thinking 的 `claude-sonnet-4-6`；请求只包含 `ping`，候选数为 1、temperature 为 0、输出限制为 1 token。
+Codex 使用参考插件已经验证的 compact 请求结构：`gpt-5.4-mini`、空 instructions 和一个 `ping` 输入，不启用 streaming 或 tools。Antigravity 复用 CPA 的 `v1internal:generateContent` 请求封装：Gemini 组使用 `gemini-3.1-flash-lite`，Claude/GPT 组使用非 thinking 的 `claude-sonnet-4-6`；请求只包含 `ping`，候选数为 1、temperature 为 0、输出限制为 1 token。
 
 只有以下条件全部满足时才可能发送：
 
 - credential 未被 CPA 或插件禁用；
 - credential 具有稳定 ChatGPT account ID；
-- 已有先前持久化 baseline；
-- baseline 的 reset + grace 已过去；
+- 已有先前持久化 baseline，或首次观测本身符合严格 lazy/已过期特征；
+- 普通 baseline 的 reset + grace 已过去；首次严格 lazy 候选则立即进入第二次 precheck；
 - precheck 仍指向同一旧 reset，或符合 Codex 的严格 lazy 特征；
 - 当前 cycle 没有 durable send fence；
 - provider 已启用自动激活；

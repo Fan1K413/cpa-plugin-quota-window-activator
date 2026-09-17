@@ -154,8 +154,19 @@ func (c *Controller) reconcileObservation(cred Credential, instanceKey, fingerpr
 				result := "baseline established"
 				if !canActivate || !activation.CanActivate(observed) {
 					state, result = StateUnsupported, "observe only"
+				} else if observed.LazyHint || !now.Before(base.ResetAt.Add(c.cfg.ResetGracePeriod)) {
+					state, result = StatePendingPrecheck, "first observation requires authoritative precheck"
 				}
-				s.Windows[key] = WindowRecord{Key: key, InstanceKey: instanceKey, Provider: cred.Provider, AuthID: cred.AuthID, BucketID: observed.BucketID, ModelFamily: observed.ModelFamily, ActivationGroup: observed.ActivationGroup, CredentialFP: fingerprint, Baseline: base, Latest: observed, State: state, NextCheck: nextDeadline(base, now, c.cfg), LastResult: result, ActivationDisabled: state == StateUnsupported}
+				record = WindowRecord{Key: key, InstanceKey: instanceKey, Provider: cred.Provider, AuthID: cred.AuthID, BucketID: observed.BucketID, ModelFamily: observed.ModelFamily, ActivationGroup: observed.ActivationGroup, CredentialFP: fingerprint, Baseline: base, Latest: observed, State: state, NextCheck: nextDeadline(base, now, c.cfg), LastResult: result, ActivationDisabled: state == StateUnsupported}
+				if state == StatePendingPrecheck {
+					record.NextCheck = time.Time{}
+					group := observed.ActivationGroup
+					if group == "" {
+						group = observed.BucketID
+					}
+					groups[group] = append(groups[group], record)
+				}
+				s.Windows[key] = record
 				continue
 			}
 			record.Latest = observed
@@ -164,6 +175,21 @@ func (c *Controller) reconcileObservation(cred Credential, instanceKey, fingerpr
 				record.State, record.LastResult, record.ActivationDisabled = StateUnsupported, "observe only", true
 				record.NextCheck = now.Add(c.cfg.ObservationInterval)
 				s.Windows[key] = record
+				continue
+			}
+			// v0.2.1 persisted strict first-observation lazy windows as ordinary
+			// future baselines. Migrate only untouched waiting records that still
+			// carry the adapter's strict lazy evidence.
+			if record.State == StateWaitingReset && observed.LazyHint && record.LastActivation.IsZero() {
+				record.Baseline = baselineFrom(instanceKey, observed)
+				record.State, record.LastResult = StatePendingPrecheck, "migrated strict lazy baseline; authoritative precheck required"
+				record.NextCheck = time.Time{}
+				s.Windows[key] = record
+				group := observed.ActivationGroup
+				if group == "" {
+					group = observed.BucketID
+				}
+				groups[group] = append(groups[group], record)
 				continue
 			}
 			if observed.ResetAt.After(record.Baseline.ResetAt.Add(c.cfg.ClockSkewTolerance)) && !observed.LazyHint {
@@ -231,6 +257,23 @@ func (c *Controller) reconcileObservation(cred Credential, instanceKey, fingerpr
 func (c *Controller) runGroup(ctx context.Context, cred Credential, adapter ActivationAdapter, records []WindowRecord) error {
 	if len(records) == 0 {
 		return nil
+	}
+	needsPrecheck := false
+	for _, record := range records {
+		if record.State == StatePendingPrecheck {
+			needsPrecheck = true
+			break
+		}
+	}
+	if needsPrecheck {
+		var err error
+		records, err = c.precheckGroup(ctx, cred, adapter, records)
+		if err != nil {
+			return err
+		}
+		if len(records) == 0 {
+			return nil
+		}
 	}
 	if c.cfg.DryRun {
 		_, err := c.store.Update(func(s *PersistentState) error {
@@ -317,6 +360,74 @@ func (c *Controller) runGroup(ctx context.Context, cred Credential, adapter Acti
 		return c.markSendOutcome(attempt, AttemptSentUnknown, "unknown", err)
 	}
 	return c.verifyAttempt(ctx, cred, adapter, attempt)
+}
+
+// precheckGroup performs the second authoritative read required for a
+// first-observation or migrated lazy candidate. It never sends a model request.
+func (c *Controller) precheckGroup(ctx context.Context, cred Credential, adapter ActivationAdapter, records []WindowRecord) ([]WindowRecord, error) {
+	obs, err := adapter.ReadQuota(ctx, cred)
+	if err != nil {
+		return nil, c.recordGroupFailure(records, err, false)
+	}
+	windows, err := normalizeWindows(obs.Windows)
+	if err != nil {
+		return nil, c.recordGroupFailure(records, err, false)
+	}
+	byBucket := make(map[string]QuotaWindow, len(windows))
+	for _, window := range windows {
+		byBucket[window.BucketID] = window
+	}
+	now := c.now().UTC()
+	confirmed := make([]WindowRecord, 0, len(records))
+	_, err = c.store.Update(func(s *PersistentState) error {
+		for _, original := range records {
+			record, ok := s.Windows[original.Key]
+			if !ok {
+				continue
+			}
+			after, ok := byBucket[record.BucketID]
+			if !ok {
+				record.State = StateRetryWait
+				record.LastResult = "precheck missing bucket"
+				record.RetryCount++
+				record.NextCheck = now.Add(c.retryDelay(record.RetryCount))
+				s.Windows[record.Key] = record
+				continue
+			}
+			record.Latest = after
+			record.LastProbe = now
+			if !adapter.CanActivate(after) || after.ActivationGroup != record.ActivationGroup {
+				record.State, record.LastResult, record.ActivationDisabled = StateUnsupported, "precheck bucket is not activation-capable", true
+				record.NextCheck = now.Add(c.cfg.ObservationInterval)
+				s.Windows[record.Key] = record
+				continue
+			}
+			if after.ResetAt.After(record.Baseline.ResetAt.Add(c.cfg.ClockSkewTolerance)) && !after.LazyHint {
+				record.Baseline = baselineFrom(record.InstanceKey, after)
+				record.State, record.LastResult, record.RetryCount = StateNormalReset, "window rolled during precheck; no activation", 0
+				record.NextCheck = nextDeadline(record.Baseline, now, c.cfg)
+				s.Windows[record.Key] = record
+				continue
+			}
+			sameReset := absDuration(after.ResetAt.Sub(record.Baseline.ResetAt)) <= c.cfg.ClockSkewTolerance
+			if !sameReset && !after.LazyHint {
+				record.State, record.LastResult = StateRetryWait, "ambiguous quota transition during precheck"
+				record.RetryCount++
+				record.NextCheck = now.Add(c.retryDelay(record.RetryCount))
+				s.Windows[record.Key] = record
+				continue
+			}
+			record.State, record.LastResult = StateLazyDetected, "authoritative precheck still shows lazy window"
+			record.NextCheck = time.Time{}
+			s.Windows[record.Key] = record
+			confirmed = append(confirmed, record)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return confirmed, nil
 }
 
 // Recover verifies every durable in-flight send. It never calls Sender.Send.

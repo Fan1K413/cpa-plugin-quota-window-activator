@@ -56,18 +56,42 @@ func (r *runtimeService) Start() {
 	r.mu.Unlock()
 	go func() {
 		defer close(r.done)
-		r.runOnce(ctx)
-		ticker := time.NewTicker(r.cfg.Core.ObservationInterval)
-		defer ticker.Stop()
 		for {
+			r.runOnce(ctx)
+			timer := time.NewTimer(r.nextDelay(time.Now().UTC()))
 			select {
 			case <-ctx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
 				return
-			case <-ticker.C:
-				r.runOnce(ctx)
+			case <-timer.C:
 			}
 		}
 	}()
+}
+
+func (r *runtimeService) nextDelay(now time.Time) time.Duration {
+	delay := r.cfg.Core.ObservationInterval
+	if delay <= 0 {
+		delay = 30 * time.Minute
+	}
+	for _, window := range r.controller.Snapshot().Windows {
+		if window.NextCheck.IsZero() || window.State == core.StateDisabled || window.State == core.StateAuthBlocked || window.State == core.StateUnsupported {
+			continue
+		}
+		candidate := window.NextCheck.Sub(now)
+		if candidate < time.Second {
+			candidate = time.Second
+		}
+		if candidate < delay {
+			delay = candidate
+		}
+	}
+	return delay
 }
 func (r *runtimeService) Stop() error {
 	r.mu.Lock()

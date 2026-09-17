@@ -4,6 +4,11 @@
 
 This is not a periodic ping plugin. The default is `dry_run: true`.
 
+Version 0.2.2 fixes activation after installation: a strict first-observation
+lazy window now receives an immediate second quota precheck instead of waiting
+one full 5-hour or long window. State written by 0.2.1 is migrated in place,
+and persisted `NextCheck` deadlines now wake the scheduler at reset + grace.
+
 ## State machine
 
 The durable key is `adapter + AuthIndex + credential fingerprint + BucketID`:
@@ -44,9 +49,9 @@ The runtime registers only credential-bound activation adapters. Unsupported pro
 
 Both activation adapters read the exact AuthIndex through `host.auth.get` and use its account-bound headers with CPA `host.http.do`. They never call CPA's public chat endpoint and never ask the scheduler to select an account.
 
-Codex uses `gpt-5.4-mini`, `ping`, non-streaming behavior, low reasoning, and a one-token output budget declaration. Antigravity uses CPA's direct `v1internal:generateContent` envelope: `gemini-3.1-flash-lite` for the Gemini group and non-thinking `claude-sonnet-4-6` for the Claude/GPT group, with `ping`, one candidate, zero temperature, and a one-token output limit.
+Codex uses the reference scheduler's proven compact request shape: `gpt-5.4-mini`, empty instructions, and one `ping` input, with no streaming or tools. Antigravity uses CPA's direct `v1internal:generateContent` envelope: `gemini-3.1-flash-lite` for the Gemini group and non-thinking `claude-sonnet-4-6` for the Claude/GPT group, with `ping`, one candidate, zero temperature, and a one-token output limit.
 
-Activation requires a persisted baseline, expired reset plus grace, a still-lazy precheck, no existing cycle fence, a supported bucket, `activate_if_lazy`, and `dry_run: false`.
+Activation requires a still-lazy authoritative precheck, no existing cycle fence, a supported bucket, `activate_if_lazy`, and `dry_run: false`. Normally the precheck runs after a persisted baseline reaches reset + grace. A strict adapter-specific first-observation lazy window, or an already-expired first observation, is persisted and then prechecked immediately before any send.
 
 ## Build and install
 

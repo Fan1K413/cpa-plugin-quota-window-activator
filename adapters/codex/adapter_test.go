@@ -52,8 +52,11 @@ func TestActivationPlanIsSmallAndCredentialBound(t *testing.T) {
 	if err = json.Unmarshal(plan.Request.Body, &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload["max_output_tokens"] != float64(1) || payload["model"] != activationModel {
+	if payload["model"] != activationModel {
 		t.Fatalf("payload=%#v", payload)
+	}
+	if _, exists := payload["max_output_tokens"]; exists {
+		t.Fatal("compact activation payload must match the proven provider format")
 	}
 }
 

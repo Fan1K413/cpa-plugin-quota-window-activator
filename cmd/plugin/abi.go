@@ -41,7 +41,7 @@ import (
 
 const (
 	pluginID      = "quota-window-activator"
-	pluginVersion = "0.2.1"
+	pluginVersion = "0.2.2"
 )
 
 var hostAPI atomic.Pointer[C.cliproxy_host_api]

@@ -253,11 +253,19 @@ func parse(raw []byte, authID string, now time.Time) (core.Observation, error) {
 				continue
 			}
 			used := 100 * (1 - fraction)
-			out = append(out, core.QuotaWindow{Provider: "antigravity", AuthID: authID, BucketID: id, ModelFamily: group, Scope: fmt.Sprintf("group-%d-bucket-%d", gi, bi), UsedPercent: &used, ResetAt: reset, WindowDuration: duration, ObservedAt: now, ActivationGroup: activationGroup(id), Complete: true})
+			lazy := used == 0 && absDuration(reset.Sub(now.Add(duration))) <= 3*time.Minute
+			out = append(out, core.QuotaWindow{Provider: "antigravity", AuthID: authID, BucketID: id, ModelFamily: group, Scope: fmt.Sprintf("group-%d-bucket-%d", gi, bi), UsedPercent: &used, ResetAt: reset, WindowDuration: duration, ObservedAt: now, ActivationGroup: activationGroup(id), LazyHint: lazy, Complete: true})
 		}
 	}
 	if len(out) == 0 {
 		return core.Observation{}, errors.New("Antigravity response has no complete stable buckets")
 	}
 	return core.Observation{Windows: out}, nil
+}
+
+func absDuration(value time.Duration) time.Duration {
+	if value < 0 {
+		return -value
+	}
+	return value
 }
