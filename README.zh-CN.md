@@ -30,19 +30,21 @@
 
 | Provider adapter | 观察的数据 | 激活策略 |
 |---|---|---|
-| Codex / ChatGPT OAuth | `wham/usage` 主 5h、主长周期、code review、additional rate limits | 仅主 5h 与 7–32 天长周期可进入 `activate_if_lazy`；共享 `codex-main` 的窗口合并为一个请求。其他 bucket 只观察 |
-| Antigravity | `retrieveUserQuotaSummary` 中有稳定 `bucketId`、window、remainingFraction、resetTime 的 bucket | 只观察；尚无充分的 lazy 行为与 bucket→最小模型证据 |
-| Claude OAuth | `oauth/usage` 的 five_hour、seven_day 与 model-specific weekly 项 | 只观察；没有证据表明需要请求才能滚动 |
-| Gemini CLI OAuth | `retrieveUserQuota` 的 modelId/tokenType/resetTime/remainingFraction | 只观察；这些行不被假设为独立可激活池 |
-| Kimi | Coding usage 中具有稳定 ID、reset 与明确 duration 的窗口 | 只观察 |
-| Grok / xAI | billing credits 中具有稳定产品/周期 ID 的窗口 | 只观察；不会调用付费 health ping |
-| 未知 provider | 无 | unsupported；记录一次日志，不构造未知请求 |
+| Codex / ChatGPT OAuth | `wham/usage` 主 5h、主长周期、code review、additional rate limits | 仅主 5h 与 7–32 天长周期可进入 `activate_if_lazy`；共享 `codex-main` 的窗口合并为一个请求。其他 bucket 不可激活 |
+| Antigravity | `retrieveUserQuotaSummary` 中有稳定 `bucketId`、window、remainingFraction、resetTime 的 bucket | `gemini-5h` + `gemini-weekly` 共享 `antigravity-gemini`；`3p-5h` + `3p-weekly` 共享 `antigravity-third-party`。每个 group 在过期 cycle 内最多发送一个绑定 credential 的请求；未知 bucket 不可激活 |
+| Claude OAuth | 不轮询 | 暂不支持；没有证据表明需要请求才能滚动窗口 |
+| Gemini CLI OAuth | 不轮询 | 暂不支持；model/token 行不被假设为独立可激活池 |
+| Kimi | 不轮询 | 暂不支持；尚无已验证的 lazy-reset 激活约定 |
+| Grok / xAI | 不轮询 | 暂不支持；不会调用付费 health 请求 |
+| 未知 provider | 不轮询 | unsupported；记录一次日志，不构造未知请求 |
 
-“只观察” adapter 没有实现 activation 接口，即使错误地配置 `activate_if_lazy` 也不会发送模型请求。
+运行时只注册能够绑定 credential 的 activation adapter。不支持的 provider 只记录一次日志，不产生后台 quota 请求。Antigravity 只有上述四个标准 bucket ID 能通过 `CanActivate`；同一 quota 响应中新出现或 model-specific 的 bucket 在共享关系与 reset 行为明确前不会激活。
 
-## Codex 最小请求
+## Credential 绑定与最小请求
 
-Codex adapter 绑定从 `host.auth.get` 读取的目标 AuthIndex，直接通过 CPA `host.http.do` 调用 ChatGPT Codex compact endpoint。它不经过 CPA 普通 `/v1/chat/completions`，不会让 scheduler 再选择账号。请求使用 `gpt-5.4-mini`、`ping`、非流式、low reasoning 与 1 个 output token 的预算声明。
+两个 activation adapter 都绑定从 `host.auth.get` 读取的目标 AuthIndex，直接通过 CPA `host.http.do` 调用 provider endpoint。它们不经过 CPA 普通 `/v1/chat/completions`，不会让 scheduler 再选择账号。
+
+Codex 请求使用 `gpt-5.4-mini`、`ping`、非流式、low reasoning 与 1 个 output token 的预算声明。Antigravity 复用 CPA 的 `v1internal:generateContent` 请求封装：Gemini 组使用 `gemini-3.1-flash-lite`，Claude/GPT 组使用非 thinking 的 `claude-sonnet-4-6`；请求只包含 `ping`，候选数为 1、temperature 为 0、输出限制为 1 token。
 
 只有以下条件全部满足时才可能发送：
 
@@ -52,7 +54,7 @@ Codex adapter 绑定从 `host.auth.get` 读取的目标 AuthIndex，直接通过
 - baseline 的 reset + grace 已过去；
 - precheck 仍指向同一旧 reset，或符合 Codex 的严格 lazy 特征；
 - 当前 cycle 没有 durable send fence；
-- provider mode 为 `activate_if_lazy`；
+- provider 已启用自动激活；
 - `dry_run` 为 false；
 - activation plan 有明确的小输入和输出预算。
 
@@ -114,22 +116,8 @@ plugins:
       providers:
         codex:
           enabled: true
-          mode: activate_if_lazy
         antigravity:
           enabled: true
-          mode: observe
-        claude:
-          enabled: true
-          mode: observe
-        gemini-cli:
-          enabled: true
-          mode: observe
-        kimi:
-          enabled: true
-          mode: observe
-        xai:
-          enabled: true
-          mode: observe
 
       disabled_credentials:
         # 使用 host.auth.list 返回的 auth ID
@@ -184,13 +172,13 @@ waiting_reset → pending_precheck → lazy_reset_detected
 
 ## 风险与上线步骤
 
-Codex compact endpoint 属于 provider 私有接口，参数和模型可随服务端变化。第一版默认 dry-run，且没有对真实账号执行任何验收请求。推荐：
+Codex compact endpoint、Antigravity internal endpoint、模型 ID 和 quota schema 都属于 provider 私有接口，可能随服务端变化。默认仍为 dry-run，开发时没有对真实账号发送验收请求。旧配置若明确写了 `mode: observe`，现在会被视为禁用且不读取 quota；在面板中勾选对应 provider 才会加入自动激活。推荐：
 
 1. 在测试账号上运行 dry-run，至少观察一个 reset；
 2. 确认自动滚动账号始终是 `normal_reset`；
-3. 只对确认存在 lazy reset 的 Codex credential 关闭 dry-run；
+3. 只对确认存在 lazy reset 的 Codex 或 Antigravity credential 关闭 dry-run；
 4. 检查一次 activation 后是否进入 `confirmed`，并确认同 cycle 没有第二次发送；
-5. 如出现 401、403、未知 quota schema 或 proxy block，保持 dry-run/observe 并升级 adapter，不要改成定时 ping。
+5. 如出现 401、403、未知 quota schema 或 proxy block，保持 dry-run 或禁用 provider，并升级 adapter，不要改成定时 ping。
 
 ## 兼容性
 

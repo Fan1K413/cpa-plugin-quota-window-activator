@@ -41,7 +41,7 @@ import (
 
 const (
 	pluginID      = "quota-window-activator"
-	pluginVersion = "0.1.1"
+	pluginVersion = "0.2.0"
 )
 
 var hostAPI atomic.Pointer[C.cliproxy_host_api]
@@ -192,10 +192,10 @@ func pluginRegistration() registration {
 				{Name: "suppression_duration", Type: pluginapi.ConfigFieldTypeString, Description: "Verify-only suppression window after an unknown send result."},
 				{Name: "request_timeout", Type: pluginapi.ConfigFieldTypeString, Description: "Timeout for quota reads and credential-bound activation requests."},
 				{Name: "max_retries", Type: pluginapi.ConfigFieldTypeInteger, Description: "Maximum control-plane read retries; this never permits a second activation send in one cycle."},
-				{Name: "max_concurrency", Type: pluginapi.ConfigFieldTypeInteger, Description: "Maximum number of credentials observed concurrently."},
+				{Name: "max_concurrency", Type: pluginapi.ConfigFieldTypeInteger, Description: "Maximum number of activation-capable credentials checked concurrently."},
 				{Name: "state_dir", Type: pluginapi.ConfigFieldTypeString, Description: "Optional directory for the crash-safe state snapshot and WAL."},
-				{Name: "providers", Type: pluginapi.ConfigFieldTypeObject, Description: "Per-provider enable and activation policy settings."},
-				{Name: "disabled_credentials", Type: pluginapi.ConfigFieldTypeArray, Description: "Auth IDs that this plugin must not observe or activate."},
+				{Name: "providers", Type: pluginapi.ConfigFieldTypeObject, Description: "Enable activation-capable providers; unsupported providers are not polled."},
+				{Name: "disabled_credentials", Type: pluginapi.ConfigFieldTypeArray, Description: "Auth IDs that this plugin must not check or activate."},
 			},
 		},
 		Capabilities: registrationCapabilities{ManagementAPI: true},

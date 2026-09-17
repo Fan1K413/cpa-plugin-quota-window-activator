@@ -30,19 +30,21 @@ State uses checksummed snapshots plus an fsynced write-ahead log. The in-process
 
 | Adapter | Observed quota | Activation |
 |---|---|---|
-| Codex / ChatGPT OAuth | Main 5h and long windows, code review, and additional limits from `wham/usage` | Main 5h and explicit 7–32 day windows can use `activate_if_lazy`; shared main windows use one request. Other buckets are observe-only |
-| Antigravity | Stable `retrieveUserQuotaSummary` buckets | Observe-only until lazy behavior and bucket-to-model evidence exist |
-| Claude OAuth | Five-hour, weekly, and model-specific weekly usage | Observe-only; no evidence that a request is needed to roll these windows |
-| Gemini CLI OAuth | `retrieveUserQuota` model/token rows | Observe-only; rows are not assumed to be independent activation buckets |
-| Kimi | Stable coding usage windows | Observe-only |
-| Grok / xAI | Stable billing credit periods | Observe-only; no paid health ping |
-| Unknown | None | Unsupported; no guessed request |
+| Codex / ChatGPT OAuth | Main 5h and long windows, code review, and additional limits from `wham/usage` | Main 5h and explicit 7–32 day windows can use `activate_if_lazy`; shared main windows use one request. Other buckets cannot activate |
+| Antigravity | Stable `retrieveUserQuotaSummary` buckets | `gemini-5h` + `gemini-weekly` share `antigravity-gemini`; `3p-5h` + `3p-weekly` share `antigravity-third-party`. Each group receives at most one credential-bound request per expired cycle. Unknown buckets cannot activate |
+| Claude OAuth | Not polled | Unsupported until there is evidence that a request is needed to roll its windows |
+| Gemini CLI OAuth | Not polled | Unsupported; model/token rows are not assumed to be independent activation buckets |
+| Kimi | Not polled | Unsupported; no proven lazy-reset activation contract |
+| Grok / xAI | Not polled | Unsupported; no paid health request |
+| Unknown | Not polled | Unsupported; no guessed request |
 
-Observe-only adapters do not implement the activation interface, so a mistaken `activate_if_lazy` setting still cannot send a model request.
+The runtime registers only credential-bound activation adapters. Unsupported providers are logged once and receive no background quota requests. Antigravity only activates its four canonical bucket IDs; new or model-specific bucket IDs returned alongside them cannot pass `CanActivate` until their sharing and reset behavior are known.
 
 ## Credential binding and minimal request
 
-The Codex adapter reads the exact AuthIndex through `host.auth.get` and uses its account-bound headers with CPA `host.http.do`. It never calls CPA's public chat endpoint and never asks the scheduler to select an account. The request uses `gpt-5.4-mini`, `ping`, non-streaming behavior, low reasoning, and a one-token output budget declaration.
+Both activation adapters read the exact AuthIndex through `host.auth.get` and use its account-bound headers with CPA `host.http.do`. They never call CPA's public chat endpoint and never ask the scheduler to select an account.
+
+Codex uses `gpt-5.4-mini`, `ping`, non-streaming behavior, low reasoning, and a one-token output budget declaration. Antigravity uses CPA's direct `v1internal:generateContent` envelope: `gemini-3.1-flash-lite` for the Gemini group and non-thinking `claude-sonnet-4-6` for the Claude/GPT group, with `ping`, one candidate, zero temperature, and a one-token output limit.
 
 Activation requires a persisted baseline, expired reset plus grace, a still-lazy precheck, no existing cycle fence, a supported bucket, `activate_if_lazy`, and `dry_run: false`.
 
@@ -90,12 +92,8 @@ plugins:
       max_retries: 5
       max_concurrency: 2
       providers:
-        codex: { enabled: true, mode: activate_if_lazy }
-        antigravity: { enabled: true, mode: observe }
-        claude: { enabled: true, mode: observe }
-        gemini-cli: { enabled: true, mode: observe }
-        kimi: { enabled: true, mode: observe }
-        xai: { enabled: true, mode: observe }
+        codex: { enabled: true }
+        antigravity: { enabled: true }
       disabled_credentials: []
 ```
 
@@ -125,7 +123,7 @@ The plugin therefore blocks runtime-only credentials and credentials with a per-
 
 ## Risk and compatibility
 
-The Codex compact endpoint and provider quota schemas are private and may change. No real account request was sent during this implementation. Dry-run is the default; validate on a test credential before production use.
+The Codex compact endpoint, Antigravity internal endpoints, model IDs, and provider quota schemas are private and may change. No real account request was sent during this implementation. Dry-run is the default; validate each provider group on a test credential before production use. A legacy configuration that explicitly sets `mode: observe` is treated as disabled and makes no quota request; enable that provider in the panel to opt into activation.
 
 The build and test baseline is CLIProxyAPI v7.2.154, plugin ABI 1, schema 5. It should remain compatible with later 7.2.x versions that preserve `host.auth.list/get`, `host.http.do`, and Management API schemas. Incomplete windows and unstable bucket IDs are rejected rather than activated.
 

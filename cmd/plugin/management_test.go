@@ -21,7 +21,7 @@ func TestStatusPageContainsNoCredentialDataAndRequiresKey(t *testing.T) {
 	}
 	for _, required := range []string{
 		"/v0/management/plugins/", "configPath", "method:'PUT'", "disabledCredentials",
-		"observationInterval", "activate_if_lazy", "Quota Window 状态",
+		"observationInterval", "activate_if_lazy", "Quota Window 状态", "['antigravity','Antigravity'",
 	} {
 		if !strings.Contains(statusPage, required) {
 			t.Fatalf("status page missing configuration feature %q", required)
@@ -30,6 +30,11 @@ func TestStatusPageContainsNoCredentialDataAndRequiresKey(t *testing.T) {
 	for _, secret := range []string{"access_token", "refresh_token", "Bearer secret"} {
 		if strings.Contains(statusPage, secret) {
 			t.Fatalf("status page contains forbidden value %q", secret)
+		}
+	}
+	for _, removed := range []string{"<select class=\"mode\"", "['gemini-cli'", "['kimi'", "['xai'"} {
+		if strings.Contains(statusPage, removed) {
+			t.Fatalf("status page still exposes observe-only provider UI %q", removed)
 		}
 	}
 }

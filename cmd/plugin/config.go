@@ -44,7 +44,7 @@ type config struct {
 }
 
 func defaultConfig() config {
-	return config{Enabled: true, DryRun: true, Core: core.DefaultConfig(), MaxRetries: 5, MaxConcurrency: 2, RequestTimeout: 30 * time.Second, StateDir: defaultStateDir(), Providers: map[string]providerConfig{"codex": {true, "activate_if_lazy"}, "antigravity": {true, "observe"}, "claude": {true, "observe"}, "kimi": {true, "observe"}, "xai": {true, "observe"}, "gemini-cli": {true, "observe"}}, Disabled: map[string]struct{}{}}
+	return config{Enabled: true, DryRun: true, Core: core.DefaultConfig(), MaxRetries: 5, MaxConcurrency: 2, RequestTimeout: 30 * time.Second, StateDir: defaultStateDir(), Providers: map[string]providerConfig{"codex": {true, "activate_if_lazy"}, "antigravity": {true, "activate_if_lazy"}}, Disabled: map[string]struct{}{}}
 }
 func defaultStateDir() string {
 	dir, e := os.UserConfigDir()
@@ -111,7 +111,9 @@ func decodeConfig(raw []byte) (config, error) {
 	for id, rawProvider := range in.Providers {
 		p, ok := cfg.Providers[id]
 		if !ok {
-			p = providerConfig{Enabled: true, Mode: "observe"}
+			// Keep legacy/unknown entries round-trippable, but do not schedule
+			// providers that have no credential-bound activation adapter.
+			p = providerConfig{Enabled: false, Mode: "observe"}
 		}
 		if rawProvider.Enabled != nil {
 			p.Enabled = *rawProvider.Enabled

@@ -10,11 +10,7 @@ import (
 
 	"github.com/cpa-plugins/quota-window-activator/adapters"
 	"github.com/cpa-plugins/quota-window-activator/adapters/antigravity"
-	"github.com/cpa-plugins/quota-window-activator/adapters/claude"
 	"github.com/cpa-plugins/quota-window-activator/adapters/codex"
-	"github.com/cpa-plugins/quota-window-activator/adapters/geminicli"
-	"github.com/cpa-plugins/quota-window-activator/adapters/kimi"
-	"github.com/cpa-plugins/quota-window-activator/adapters/xai"
 	"github.com/cpa-plugins/quota-window-activator/core"
 	cpahost "github.com/cpa-plugins/quota-window-activator/host/cpa"
 )
@@ -34,7 +30,7 @@ type runtimeService struct {
 
 func newRuntime(cfg config) (*runtimeService, error) {
 	host := cpahost.Client{Call: callHostCallback}
-	registry, e := adapters.NewRegistry(codex.New(host), antigravity.New(host), claude.New(host), kimi.New(host), xai.New(host), geminicli.New(host))
+	registry, e := adapters.NewRegistry(codex.New(host), antigravity.New(host))
 	if e != nil {
 		return nil, e
 	}
@@ -107,7 +103,7 @@ func (r *runtimeService) runOnce(ctx context.Context) {
 			continue
 		}
 		p := r.cfg.Providers[adapter.ID()]
-		if !p.Enabled {
+		if !p.Enabled || p.Mode != "activate_if_lazy" {
 			continue
 		}
 		if _, off := r.cfg.Disabled[summary.AuthID]; off {
@@ -124,12 +120,8 @@ func (r *runtimeService) runOnce(ctx context.Context) {
 			defer func() { <-slots }()
 			requestCtx, cancel := context.WithTimeout(ctx, r.cfg.RequestTimeout)
 			defer cancel()
-			tickAdapter := adapter
-			if p.Mode != "activate_if_lazy" {
-				tickAdapter = observerOnly{Adapter: adapter}
-			}
 			if summary.Disabled {
-				if e := r.controller.Tick(requestCtx, summary, tickAdapter); e != nil && !errors.Is(e, context.Canceled) {
+				if e := r.controller.Tick(requestCtx, summary, adapter); e != nil && !errors.Is(e, context.Canceled) {
 					r.logFailure(summary, e)
 				}
 				return
@@ -150,12 +142,12 @@ func (r *runtimeService) runOnce(ctx context.Context) {
 				return
 			}
 			before := r.controller.Snapshot()
-			if activating, ok := adapter.(core.ActivationAdapter); ok && p.Mode == "activate_if_lazy" {
+			if activating, ok := adapter.(core.ActivationAdapter); ok {
 				if e = r.controller.Recover(requestCtx, cred, activating); e != nil && !errors.Is(e, context.Canceled) {
 					r.logFailure(summary, e)
 				}
 			}
-			if e = r.controller.Tick(requestCtx, cred, tickAdapter); e != nil && !errors.Is(e, context.Canceled) {
+			if e = r.controller.Tick(requestCtx, cred, adapter); e != nil && !errors.Is(e, context.Canceled) {
 				r.logFailure(summary, e)
 			}
 			r.logStateChanges(before, r.controller.Snapshot(), summary)
@@ -240,8 +232,6 @@ func bounded(s string) string {
 	return s
 }
 
-type observerOnly struct{ core.Adapter }
-
 func (r *runtimeService) status() any {
 	r.mu.Lock()
 	lastRun, lastError := r.lastRun, r.lastError
@@ -249,6 +239,9 @@ func (r *runtimeService) status() any {
 	state := r.controller.Snapshot()
 	windows := make([]core.WindowRecord, 0, len(state.Windows))
 	for _, w := range state.Windows {
+		if w.Provider != "codex" && w.Provider != "antigravity" {
+			continue
+		}
 		w.CredentialFP = ""
 		windows = append(windows, w)
 	}

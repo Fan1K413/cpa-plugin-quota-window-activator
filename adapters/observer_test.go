@@ -13,10 +13,16 @@ import (
 )
 
 func TestObservationAdaptersDoNotExposeActivation(t *testing.T) {
-	for _, a := range []core.Adapter{antigravity.New(nil), claude.New(nil), geminicli.New(nil), kimi.New(nil), xai.New(nil)} {
+	for _, a := range []core.Adapter{claude.New(nil), geminicli.New(nil), kimi.New(nil), xai.New(nil)} {
 		if _, ok := a.(core.ActivationAdapter); ok {
 			t.Fatalf("%s unexpectedly exposes activation", a.ID())
 		}
+	}
+}
+
+func TestAntigravityExposesCredentialBoundActivation(t *testing.T) {
+	if _, ok := any(antigravity.New(nil)).(core.ActivationAdapter); !ok {
+		t.Fatal("antigravity activation adapter missing")
 	}
 }
 

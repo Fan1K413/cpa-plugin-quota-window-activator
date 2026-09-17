@@ -5,18 +5,38 @@ import (
 	"time"
 )
 
-func TestDefaultConfigIsDryRunAndOnlyCodexCanActivate(t *testing.T) {
+func TestDefaultConfigIsDryRunAndSupportedProvidersCanActivate(t *testing.T) {
 	cfg := defaultConfig()
 	if !cfg.DryRun || !cfg.Core.DryRun {
 		t.Fatal("default must be dry-run")
 	}
-	if cfg.Providers["codex"].Mode != "activate_if_lazy" {
-		t.Fatal("Codex activation mode missing")
-	}
-	for id, provider := range cfg.Providers {
-		if id != "codex" && provider.Mode != "observe" {
-			t.Fatalf("provider %s mode=%s", id, provider.Mode)
+	for _, id := range []string{"codex", "antigravity"} {
+		if cfg.Providers[id].Mode != "activate_if_lazy" {
+			t.Fatalf("%s activation mode missing", id)
 		}
+	}
+	if len(cfg.Providers) != 2 {
+		t.Fatalf("only activation-capable providers should be scheduled: %#v", cfg.Providers)
+	}
+}
+
+func TestLegacyObserveModeDoesNotBecomeActivation(t *testing.T) {
+	cfg, err := decodeConfig([]byte("providers:\n  antigravity:\n    enabled: true\n    mode: observe\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Providers["antigravity"].Mode != "observe" {
+		t.Fatalf("legacy observe mode changed: %#v", cfg.Providers["antigravity"])
+	}
+}
+
+func TestUnknownProviderDefaultsToDisabled(t *testing.T) {
+	cfg, err := decodeConfig([]byte("providers:\n  future-provider:\n    mode: observe\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Providers["future-provider"].Enabled {
+		t.Fatal("unsupported provider must not be scheduled")
 	}
 }
 

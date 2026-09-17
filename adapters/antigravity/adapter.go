@@ -2,10 +2,12 @@ package antigravity
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,7 +16,18 @@ import (
 	"github.com/cpa-plugins/quota-window-activator/core"
 )
 
-var quotaURLs = []string{"https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary", "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:retrieveUserQuotaSummary", "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"}
+const (
+	dailyBaseURL     = "https://daily-cloudcode-pa.googleapis.com"
+	quotaSummaryPath = "/v1internal:retrieveUserQuotaSummary"
+	generatePath     = "/v1internal:generateContent"
+	geminiGroup      = "antigravity-gemini"
+	thirdPartyGroup  = "antigravity-third-party"
+	geminiProbeModel = "gemini-3.1-flash-lite"
+	thirdPartyModel  = "claude-sonnet-4-6"
+	antigravityUA    = "antigravity/cli/1.0.13 (aidev_client; os_type=windows; arch=amd64)"
+)
+
+var quotaURLs = []string{dailyBaseURL + quotaSummaryPath, "https://daily-cloudcode-pa.sandbox.googleapis.com" + quotaSummaryPath, "https://cloudcode-pa.googleapis.com" + quotaSummaryPath}
 
 type Adapter struct {
 	Client adapters.HTTPClient
@@ -49,7 +62,7 @@ func (a *Adapter) ReadQuota(ctx context.Context, c core.Credential) (core.Observ
 	body, _ := json.Marshal(map[string]string{"project": project})
 	var last error
 	for _, url := range quotaURLs {
-		resp, e := a.Client.Do(ctx, c, core.ActivationRequest{Method: http.MethodPost, URL: url, Headers: http.Header{"Authorization": []string{"Bearer " + token}, "Content-Type": []string{"application/json"}, "User-Agent": []string{"antigravity/cli/1.0.13 (aidev_client; os_type=windows; arch=amd64)"}}, Body: body})
+		resp, e := a.Client.Do(ctx, c, core.ActivationRequest{Method: http.MethodPost, URL: url, Headers: antigravityHeaders(token), Body: body})
 		if e != nil {
 			last = e
 			continue
@@ -62,6 +75,144 @@ func (a *Adapter) ReadQuota(ctx context.Context, c core.Credential) (core.Observ
 	}
 	return core.Observation{}, last
 }
+
+// CanActivate is deliberately limited to the stable buckets published by
+// retrieveUserQuotaSummary. Unknown/model-specific buckets remain observable
+// until their sharing and lazy-reset semantics are proven.
+func (*Adapter) CanActivate(w core.QuotaWindow) bool {
+	group := activationGroup(w.BucketID)
+	if group == "" || w.ActivationGroup != group {
+		return false
+	}
+	return w.WindowDuration == 5*time.Hour || w.WindowDuration == 7*24*time.Hour
+}
+
+func (a *Adapter) PlanActivation(_ context.Context, c core.Credential, records []core.WindowRecord) (core.ActivationPlan, error) {
+	if len(records) == 0 {
+		return core.ActivationPlan{}, errors.New("no target windows")
+	}
+	group := records[0].ActivationGroup
+	model := activationModel(group)
+	if model == "" {
+		return core.ActivationPlan{}, errors.New("unsupported Antigravity activation group")
+	}
+	keys := make([]string, 0, len(records))
+	for _, record := range records {
+		if record.ActivationGroup != group || !a.CanActivate(record.Latest) {
+			return core.ActivationPlan{}, errors.New("Antigravity activation records cross quota groups")
+		}
+		keys = append(keys, record.Key)
+	}
+	doc, err := providerutil.Decode(c.RawJSON)
+	if err != nil {
+		return core.ActivationPlan{}, err
+	}
+	token, _ := providerutil.DeepString(doc, "access_token")
+	project, _ := providerutil.DeepString(doc, "project_id", "projectId")
+	if token == "" || project == "" {
+		return core.ActivationPlan{}, errors.New("Antigravity token or project missing")
+	}
+	requestID, sessionID, err := requestIDs()
+	if err != nil {
+		return core.ActivationPlan{}, err
+	}
+	payload := map[string]any{
+		"model":       model,
+		"userAgent":   "antigravity",
+		"requestType": "agent",
+		"project":     project,
+		"requestId":   requestID,
+		"request": map[string]any{
+			"sessionId": sessionID,
+			"contents": []any{map[string]any{
+				"role":  "user",
+				"parts": []any{map[string]any{"text": "ping"}},
+			}},
+			"generationConfig": map[string]any{
+				"candidateCount":  1,
+				"maxOutputTokens": 1,
+				"temperature":     0,
+			},
+		},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return core.ActivationPlan{}, err
+	}
+	baseURL := antigravityBaseURL(c, doc)
+	return core.ActivationPlan{
+		Group: group, WindowKeys: keys, TargetModel: model, MaxInput: 4, MaxOutput: 1,
+		Request: core.ActivationRequest{Method: http.MethodPost, URL: baseURL + generatePath, Headers: antigravityHeaders(token), Body: body},
+	}, nil
+}
+
+func (*Adapter) VerifyActivation(before core.Baseline, after core.QuotaWindow) core.VerifyResult {
+	if after.ResetAt.After(before.ResetAt.Add(2 * time.Minute)) {
+		return core.VerifyResult{Confirmed: true, Reason: "new Antigravity quota window confirmed"}
+	}
+	return core.VerifyResult{Reason: "Antigravity window has not rolled after activation"}
+}
+
+func antigravityHeaders(token string) http.Header {
+	return http.Header{
+		"Authorization": []string{"Bearer " + token},
+		"Content-Type":  []string{"application/json"},
+		"User-Agent":    []string{antigravityUA},
+	}
+}
+
+func activationGroup(bucketID string) string {
+	switch strings.ToLower(strings.TrimSpace(bucketID)) {
+	case "gemini-5h", "gemini-weekly":
+		return geminiGroup
+	case "3p-5h", "3p-weekly":
+		return thirdPartyGroup
+	default:
+		return ""
+	}
+}
+
+func activationModel(group string) string {
+	switch group {
+	case geminiGroup:
+		return geminiProbeModel
+	case thirdPartyGroup:
+		return thirdPartyModel
+	default:
+		return ""
+	}
+}
+
+func antigravityBaseURL(c core.Credential, doc map[string]any) string {
+	for _, key := range []string{"base_url", "base-url"} {
+		if value := strings.TrimSpace(c.Attributes[key]); value != "" {
+			return strings.TrimRight(value, "/")
+		}
+	}
+	if value, _ := providerutil.DeepString(doc, "base_url", "base-url"); value != "" {
+		return strings.TrimRight(value, "/")
+	}
+	return dailyBaseURL
+}
+
+func requestIDs() (string, string, error) {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", "", fmt.Errorf("generate Antigravity request ID: %w", err)
+	}
+	requestID := fmt.Sprintf("agent-%x-%x-%x-%x-%x", raw[0:4], raw[4:6], raw[6:8], raw[8:10], raw[10:16])
+	var sessionRaw [8]byte
+	if _, err := rand.Read(sessionRaw[:]); err != nil {
+		return "", "", fmt.Errorf("generate Antigravity session ID: %w", err)
+	}
+	var value uint64
+	for _, b := range sessionRaw {
+		value = value<<8 | uint64(b)
+	}
+	value = value%9_000_000_000_000_000_000 + 1
+	return requestID, "-" + strconv.FormatUint(value, 10), nil
+}
+
 func parse(raw []byte, authID string, now time.Time) (core.Observation, error) {
 	doc, e := providerutil.Decode(raw)
 	if e != nil {
@@ -102,7 +253,7 @@ func parse(raw []byte, authID string, now time.Time) (core.Observation, error) {
 				continue
 			}
 			used := 100 * (1 - fraction)
-			out = append(out, core.QuotaWindow{Provider: "antigravity", AuthID: authID, BucketID: id, ModelFamily: group, Scope: fmt.Sprintf("group-%d-bucket-%d", gi, bi), UsedPercent: &used, ResetAt: reset, WindowDuration: duration, ObservedAt: now, Complete: true})
+			out = append(out, core.QuotaWindow{Provider: "antigravity", AuthID: authID, BucketID: id, ModelFamily: group, Scope: fmt.Sprintf("group-%d-bucket-%d", gi, bi), UsedPercent: &used, ResetAt: reset, WindowDuration: duration, ObservedAt: now, ActivationGroup: activationGroup(id), Complete: true})
 		}
 	}
 	if len(out) == 0 {
